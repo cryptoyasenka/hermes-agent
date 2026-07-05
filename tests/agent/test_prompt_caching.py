@@ -117,6 +117,31 @@ class TestCanCarryMarker:
         # Empty list -> not a carrier.
         assert _can_carry_marker({"role": "user", "content": []}, native_anthropic=False) is False
 
+    def test_native_list_carrier_requires_last_part_dict(self):
+        """Native parity with the envelope fix (#58129): _apply_cache_marker on the
+        native layout also writes NO marker for an empty list or a list whose last
+        element isn't a dict (it only marks the last part when that part is a dict).
+        The carrier gate must agree, or a non-marking message consumes one of the
+        four breakpoints. The markable native shapes still carry."""
+        # Markable native shapes still carry (top-level marker is relocated by the
+        # adapter for tool/empty/None; str and list-with-dict-last are marked).
+        assert _can_carry_marker({"role": "tool", "content": ""}, native_anthropic=True) is True
+        assert _can_carry_marker({"role": "assistant", "content": ""}, native_anthropic=True) is True
+        assert _can_carry_marker({"role": "assistant", "content": None}, native_anthropic=True) is True
+        assert _can_carry_marker({"role": "user", "content": "hi"}, native_anthropic=True) is True
+        assert _can_carry_marker(
+            {"role": "user", "content": [{"type": "text", "text": "a"}]},
+            native_anthropic=True,
+        ) is True
+        # Non-marking native shapes must NOT carry (the fix): last element non-dict,
+        # and empty list. Previously both passed the unconditional native gate but
+        # received no marker, wasting a breakpoint.
+        assert _can_carry_marker(
+            {"role": "user", "content": [{"type": "text", "text": "a"}, "trailing raw"]},
+            native_anthropic=True,
+        ) is False
+        assert _can_carry_marker({"role": "user", "content": []}, native_anthropic=True) is False
+
 
 class TestApplyAnthropicCacheControl:
     def test_empty_messages(self):
@@ -223,3 +248,33 @@ class TestApplyAnthropicCacheControl:
         assert isinstance(result[1]["content"], list)
         assert result[1]["content"][0]["cache_control"] == {"type": "ephemeral"}
         assert "cache_control" not in result[1]
+
+    def test_native_non_marking_message_does_not_waste_breakpoint(self):
+        """Native layout: a message whose content cannot receive a marker (list whose
+        last part isn't a dict) must not consume a breakpoint, so all four land on
+        messages that actually carry one. Mirrors #58129 for the native layout."""
+        msgs = [
+            {"role": "system", "content": "System"},
+            {"role": "user", "content": [{"type": "text", "text": "m1"}]},
+            {"role": "assistant", "content": [{"type": "text", "text": "m2"}]},
+            {"role": "user", "content": [{"type": "text", "text": "m3"}]},
+            # Non-marking: last content part is a raw string, so _apply_cache_marker
+            # writes nothing here.
+            {"role": "assistant", "content": [{"type": "text", "text": "m4"}, "trailing raw"]},
+        ]
+        result = apply_anthropic_cache_control(msgs, native_anthropic=True)
+
+        def carries(m):
+            if "cache_control" in m:
+                return True
+            c = m.get("content")
+            return isinstance(c, list) and bool(c) and isinstance(c[-1], dict) and "cache_control" in c[-1]
+
+        # system + 3 markable messages (m1, m2, m3) = 4. The non-marking m4 must not
+        # steal a breakpoint from m1.
+        assert sum(1 for m in result if carries(m)) == 4
+        # m1 must have received the marker (it would be starved if m4 consumed a slot).
+        assert result[1]["content"][-1]["cache_control"] == {"type": "ephemeral"}
+        # m4 carries nothing: no top-level marker, and its dict part is unmarked.
+        assert "cache_control" not in result[4]
+        assert "cache_control" not in result[4]["content"][0]

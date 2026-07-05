@@ -52,16 +52,30 @@ def _apply_cache_marker(msg: dict, cache_marker: dict, native_anthropic: bool = 
 def _can_carry_marker(msg: dict, native_anthropic: bool) -> bool:
     """True if a marker on this message is actually honored by the provider.
 
-    On the native Anthropic layout every message works (top-level markers are
-    relocated by the adapter). On the envelope layout (OpenRouter et al.) only
+    On the native Anthropic layout most messages work (top-level markers are
+    relocated by the adapter), but _apply_cache_marker writes nothing for an
+    empty list or a list whose last element isn't a dict, so those must not
+    consume a breakpoint either. On the envelope layout (OpenRouter et al.) only
     markers inside content parts are honored: empty-content messages (e.g.
     assistant turns that are pure tool_calls) and empty tool messages would
     receive a top-level marker the provider ignores — wasting one of the four
     breakpoints. Skip those so the breakpoints land on messages that count.
     """
-    if native_anthropic:
-        return True
     content = msg.get("content")
+    if native_anthropic:
+        # Mirror _apply_cache_marker's native branch: it marks tool messages and
+        # empty/None content top-level (adapter relocates), and marks a string or
+        # a list whose LAST part is a dict. It writes nothing for an empty list or
+        # a list whose last element isn't a dict — those cannot carry a marker.
+        if msg.get("role") == "tool":
+            return True
+        if content is None or content == "":
+            return True
+        if isinstance(content, str):
+            return True
+        if isinstance(content, list):
+            return bool(content) and isinstance(content[-1], dict)
+        return False
     if content is None or content == "":
         return False
     if isinstance(content, list):
