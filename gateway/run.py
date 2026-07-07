@@ -5547,6 +5547,15 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         return True
 
+    def _cron_job_count(self) -> int:
+        """In-flight cron jobs (tracked in cron.scheduler, imported lazily to
+        avoid a hard cron dependency)."""
+        try:
+            from cron.scheduler import running_job_count
+            return running_job_count()
+        except Exception:
+            return 0
+
     async def _drain_active_agents(self, timeout: float) -> tuple[Dict[str, Any], bool]:
         snapshot = self._snapshot_running_agents()
         last_active_count = self._running_agent_count()
@@ -5561,7 +5570,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 last_active_count = active_count
                 last_status_at = now
 
-        if not self._running_agents:
+        if not self._running_agents and self._cron_job_count() == 0:
             _maybe_update_status(force=True)
             return snapshot, False
 
@@ -5570,10 +5579,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             return snapshot, True
 
         deadline = asyncio.get_running_loop().time() + timeout
-        while self._running_agents and asyncio.get_running_loop().time() < deadline:
+        # Cron jobs live in cron.scheduler, not _running_agents; keep draining
+        # while either has work so /update waits like /restart (#60432).
+        while (self._running_agents or self._cron_job_count()) and (
+            asyncio.get_running_loop().time() < deadline
+        ):
             _maybe_update_status()
             await asyncio.sleep(0.1)
-        timed_out = bool(self._running_agents)
+        timed_out = bool(self._running_agents) or self._cron_job_count() > 0
         _maybe_update_status(force=True)
         return snapshot, timed_out
 
@@ -8005,6 +8018,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     logger.debug("pre-drain mark_resume_pending failed for %s: %s", _sk, _e)
 
             _drain_started_at = time.monotonic()
+            _cron_at_start = self._cron_job_count()
             active_agents, timed_out = await self._drain_active_agents(timeout)
             logger.info(
                 "Shutdown phase: drain done at +%.2fs (drain took %.2fs, "
@@ -8012,8 +8026,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 _phase_elapsed(),
                 time.monotonic() - _drain_started_at,
                 timed_out,
-                len(active_agents),
-                self._running_agent_count(),
+                len(active_agents) + _cron_at_start,
+                self._running_agent_count() + self._cron_job_count(),
             )
 
             if not timed_out:

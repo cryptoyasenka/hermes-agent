@@ -287,6 +287,30 @@ async def test_drain_active_agents_throttles_status_updates():
 
 
 @pytest.mark.asyncio
+async def test_drain_active_agents_waits_for_in_flight_cron_jobs():
+    """Cron jobs are tracked in cron.scheduler, not _running_agents, so the
+    drain must still block and time out on an in-flight job (#60432)."""
+    import cron.scheduler as sched
+
+    runner, _adapter = make_restart_runner()
+    runner._running_agents = {}
+
+    sched._running_job_ids.add("job-x")
+    try:
+        timeout = 2.0
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        _snapshot, timed_out = await runner._drain_active_agents(timeout)
+        elapsed = loop.time() - started
+
+        assert timed_out is True
+        assert elapsed >= timeout * 0.7
+        assert "job-x" in sched._running_job_ids
+    finally:
+        sched._running_job_ids.discard("job-x")
+
+
+@pytest.mark.asyncio
 async def test_gateway_stop_kills_tool_subprocesses_before_adapter_disconnect_on_timeout(monkeypatch):
     """On drain timeout, tool subprocesses must be killed BEFORE adapter
     disconnect so systemd's TimeoutStopSec doesn't SIGKILL the cgroup with
