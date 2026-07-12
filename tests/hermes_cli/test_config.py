@@ -1928,3 +1928,51 @@ class TestCodexAppServerAutoConfig:
             assert raw["compression"]["codex_app_server_auto"] == "hermes"
 
 
+class TestTopLevelPlatformsSurvivesMigration:
+    """Guard: the top-level ``platforms`` tree (gateway adapter credentials such
+    as ``platforms.feishu.app_id``/``app_secret``/``admins``) must survive a
+    schema version bump.
+
+    Unlike ``display.platforms``, the top-level ``platforms`` section is NOT
+    part of DEFAULT_CONFIG -- it is pure user data written per profile. Every
+    migration step reads via ``read_raw_config()`` and mutates in place, and
+    ``_persist_migration`` -> ``save_config`` only strips leaves equal to their
+    schema default, so a populated feishu block is never a default and must be
+    carried forward untouched. This locks the v30->v32 upgrade path (issue
+    #62723) against a regression where the section is dropped on the version bump.
+    """
+
+    @pytest.mark.parametrize("start_version", [30, 31])
+    def test_populated_platforms_feishu_survives_version_bump(self, tmp_path, start_version):
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            yaml.safe_dump({
+                "_config_version": start_version,
+                "model": {"default": "test-model", "provider": "openrouter"},
+                "platforms": {
+                    "feishu": {
+                        "app_id": "cli_a1b2c3d4e5",
+                        "app_secret": "secretZZZ_top_secret",
+                        "admins": ["ou_admin_111", "ou_admin_222"],
+                    },
+                },
+            }, sort_keys=False),
+            encoding="utf-8",
+        )
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            migrate_config(interactive=False, quiet=True)
+            raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            loaded = load_config()
+
+        latest = DEFAULT_CONFIG["_config_version"]
+        assert raw["_config_version"] == latest
+        # On-disk raw config still carries the user's platform credentials.
+        feishu_raw = raw["platforms"]["feishu"]
+        assert feishu_raw["app_id"] == "cli_a1b2c3d4e5"
+        assert feishu_raw["app_secret"] == "secretZZZ_top_secret"
+        assert feishu_raw["admins"] == ["ou_admin_111", "ou_admin_222"]
+        # And the merged read-time view exposes them too.
+        feishu_loaded = loaded["platforms"]["feishu"]
+        assert feishu_loaded["app_id"] == "cli_a1b2c3d4e5"
+        assert feishu_loaded["app_secret"] == "secretZZZ_top_secret"
+
