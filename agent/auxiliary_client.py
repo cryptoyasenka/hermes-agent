@@ -5157,6 +5157,7 @@ def _refresh_nous_auxiliary_client(
     main_runtime: Optional[Dict[str, Any]] = None,
     is_vision: bool = False,
     lookup_model: Optional[str] = None,
+    lookup_task: Optional[str] = None,
 ) -> Tuple[Optional[Any], Optional[str]]:
     """Refresh Nous runtime creds, rebuild the client, and replace the cache entry.
 
@@ -5170,6 +5171,13 @@ def _refresh_nous_auxiliary_client(
     Keying on the resolved ``model`` instead stored under a different key (model
     element ``"Hermes-4-405B"`` vs the lookup's ``""``), leaving the expired
     client immortal so every auxiliary call 401s forever (#56889).
+
+    ``lookup_task`` is the task the stale client was acquired under. For
+    ``provider == "auto"`` the task participates in the cache key (task-specific
+    fallback policy), so it MUST be carried into the key here for the same
+    reason as ``lookup_model``; otherwise an auto-provider client refreshed on a
+    401 lands under the ``task=""`` key while the stale entry survives under the
+    task-scoped key (#58894).
     """
     runtime = _resolve_nous_runtime_api(force_refresh=True)
     if runtime is None:
@@ -5198,6 +5206,7 @@ def _refresh_nous_auxiliary_client(
         api_mode=api_mode,
         main_runtime=main_runtime,
         is_vision=is_vision,
+        task=lookup_task,
         model=lookup_model,
     )
     _store_cached_client(cache_key, client, final_model, bound_loop=current_loop)
@@ -6030,6 +6039,7 @@ def call_llm(
             api_key=resolved_api_key,
             api_mode=resolved_api_mode,
             main_runtime=main_runtime,
+            task=task,
         )
         if client is None:
             # When the user explicitly chose a non-OpenRouter provider but no
@@ -6258,6 +6268,7 @@ def call_llm(
                 cache_provider=resolved_provider or "nous",
                 model=final_model,
                 lookup_model=resolved_model,
+                lookup_task=task,
                 async_mode=False,
                 base_url=resolved_base_url,
                 api_key=resolved_api_key,
@@ -6290,6 +6301,7 @@ def call_llm(
                 cache_provider=resolved_provider or "nous",
                 model=final_model,
                 lookup_model=resolved_model,
+                lookup_task=task,
                 async_mode=False,
                 base_url=resolved_base_url,
                 api_key=resolved_api_key,
@@ -6629,6 +6641,8 @@ async def async_call_llm(
             base_url=resolved_base_url,
             api_key=resolved_api_key,
             api_mode=resolved_api_mode,
+            main_runtime=main_runtime,
+            task=task,
         )
         if client is None:
             _explicit = (resolved_provider or "").strip().lower()
@@ -6790,10 +6804,12 @@ async def async_call_llm(
                 cache_provider=resolved_provider or "nous",
                 model=final_model,
                 lookup_model=resolved_model,
+                lookup_task=task,
                 async_mode=True,
                 base_url=resolved_base_url,
                 api_key=resolved_api_key,
                 api_mode=resolved_api_mode,
+                main_runtime=main_runtime,
                 is_vision=(task == "vision"),
             )
             if refreshed_client is not None:
@@ -6821,10 +6837,12 @@ async def async_call_llm(
                 cache_provider=resolved_provider or "nous",
                 model=final_model,
                 lookup_model=resolved_model,
+                lookup_task=task,
                 async_mode=True,
                 base_url=resolved_base_url,
                 api_key=resolved_api_key,
                 api_mode=resolved_api_mode,
+                main_runtime=main_runtime,
                 is_vision=(task == "vision"),
             )
             if refreshed_client is not None:
