@@ -1,0 +1,26 @@
+name: linux-verify-78981
+on:
+  push:
+    branches: [ci/linux-verify-78981]
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v6
+      - run: uv python install 3.11
+      - run: uv sync --locked --python 3.11 --extra all --extra dev --extra anthropic --extra mistral --extra fal --extra modal --extra daytona --extra hindsight --extra parallel-web
+      - name: GREEN with fix applied
+        run: uv run pytest tests/agent/test_aux_progress_streaming.py -q --no-header -p no:cacheprovider -rf
+      - name: RED with fix reverted
+        run: |
+          set +e
+          FIX=$(git log --format=%H --grep="count only real stream deltas" -1)
+          echo "fix commit: $FIX"
+          git checkout ${FIX}~1 -- agent/auxiliary_client.py
+          git --no-pager diff --stat
+          uv run pytest tests/agent/test_aux_progress_streaming.py -q --no-header -p no:cacheprovider -rf
+          echo "pytest exit code: $?"
+          git checkout HEAD -- agent/auxiliary_client.py
