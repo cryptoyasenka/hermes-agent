@@ -3848,19 +3848,38 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                         # about to be re-streamed.  Structured WARNING is
                         # emitted by ``_emit_stream_drop`` below; no
                         # additional INFO line needed.
-                        try:
-                            agent._fire_stream_delta(
-                                "\n\n⚠ Connection dropped mid tool-call; "
-                                "reconnecting…\n\n"
-                            )
-                        except Exception:
-                            pass
                         # Reset the streamed-text buffer so the retry's
                         # fresh preamble doesn't get double-recorded in
                         # _current_streamed_assistant_text (which would
                         # pollute the interim-visible-text comparison).
+                        # The reset MUST run before the marker is fired:
+                        # a reasoning model that opened '<think>' and died
+                        # before '</think>' leaves the streaming think
+                        # scrubber latched inside the block, and every
+                        # delta fed to it afterwards is discarded as
+                        # reasoning content.  _reset_stream_delivery_tracking
+                        # flushes that scrubber (closing the orphaned
+                        # block); firing first instead fed the marker into
+                        # the still-open block and the user never saw it.
+                        _had_visible_text = bool(
+                            getattr(agent, "_current_streamed_assistant_text", "")
+                        )
                         try:
                             agent._reset_stream_delivery_tracking()
+                        except Exception:
+                            pass
+                        # See the stalled-stream site below: the flush empties
+                        # _current_streamed_assistant_text, so hand the
+                        # marker's leading paragraph break to the existing
+                        # break flag to keep the spacing it had before the
+                        # flush was introduced.
+                        if _had_visible_text:
+                            agent._stream_needs_break = True
+                        try:
+                            agent._fire_stream_delta(
+                                "⚠ Connection dropped mid tool-call; "
+                                "reconnecting…\n\n"
+                            )
                         except Exception:
                             pass
                         # Reset in-memory accumulators so the next
@@ -4266,9 +4285,44 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                     f"Ask me to retry if you want to continue."
                 )
                 _partial_text = (_partial_text or "") + _warn
+                # Flush the streaming scrubbers before firing, otherwise the
+                # warning is silently swallowed on exactly the turns that
+                # need it most.  A reasoning model that emitted '<think>'
+                # and then died mid tool-call leaves the streaming think
+                # scrubber latched inside the block (the closing '</think>'
+                # never arrives, and once tool-call deltas start the
+                # accumulator writes content straight to the display
+                # callback, so the scrubber can't be closed by later text
+                # either).  Every delta fed to a latched scrubber is
+                # discarded as reasoning content — including this warning —
+                # and _fire_stream_delta then returns early on the empty
+                # string, so the user is told nothing at all and assumes
+                # the tool ran.  _reset_stream_delivery_tracking flushes
+                # the think scrubber (which drops the orphaned block and
+                # clears the latch) and then the context scrubber.
+                # Ordering note: this must stay AFTER _partial_text is
+                # captured above, because the reset clears
+                # _current_streamed_assistant_text — moving it earlier
+                # throws away the text recovered for the stub.
+                _had_visible_text = bool(
+                    getattr(agent, "_current_streamed_assistant_text", "")
+                )
+                try:
+                    agent._reset_stream_delivery_tracking()
+                except Exception:
+                    pass
+                # The flush empties _current_streamed_assistant_text, and
+                # _fire_stream_delta strips leading newlines from what it
+                # takes to be the turn's first delta.  Hand the paragraph
+                # break to the existing break flag instead, so the warning
+                # still opens its own paragraph when text preceded it and
+                # stays flush-left when nothing did, matching the spacing the
+                # notice had before the flush was introduced.
+                if _had_visible_text:
+                    agent._stream_needs_break = True
                 # Fire as streaming delta so the user sees it immediately.
                 try:
-                    agent._fire_stream_delta(_warn)
+                    agent._fire_stream_delta(_warn.lstrip("\n"))
                 except Exception:
                     pass
                 logger.warning(
